@@ -57,7 +57,6 @@ trap 'early_error $? $LINENO "$BASH_COMMAND"' ERR
 # ============================================================
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
-ENV_LOADED="0"
 ENV_MISSING="0"
 ENV_INSECURE="0"
 ENV_INSECURE_REASON=""
@@ -99,7 +98,6 @@ env_is_secure() {
 
 load_env_file() {
   local file="$1"
-  local loaded="0"
   local line key val
 
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -123,14 +121,9 @@ load_env_file() {
         val="${val//\$HOME/$HOME}"
       fi
       printf -v "$key" '%s' "$val"
-      export "$key"
-      loaded="1"
+      export "${key?}"
     fi
   done < "$file"
-
-  if [[ "$loaded" == "1" ]]; then
-    ENV_LOADED="1"
-  fi
 }
 
 if [[ -f "$ENV_FILE" ]]; then
