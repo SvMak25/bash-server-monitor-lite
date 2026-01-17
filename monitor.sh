@@ -1,11 +1,25 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+render_msg() {
+  local tpl="$1"; shift
+  local key val
+  while (( $# >= 2 )); do
+    key="$1"; val="$2"
+    tpl="${tpl//\{$key\}/$val}"
+    shift 2
+  done
+  printf '%s' "$tpl"
+}
+
 early_error() {
-  echo "$(date '+%F %T') [FATAL][EARLY] line=$2 cmd='$3' exit=$1" >&2
+  local now
+  now="$(date '+%F %T')"
+  echo "$(render_msg "${ERR_EARLY_STDERR:-${now} [FATAL][EARLY] line={LINE} cmd='{CMD}' exit={EXIT}}" \
+    TIME "$now" LINE "$2" CMD "$3" EXIT "$1")" >&2
   if [[ -n "${LOG_FILE:-}" ]]; then
-    printf '%s [FATAL][EARLY] line=%s cmd=%s exit=%s\n' \
-      "$(date '+%Y-%m-%d %H:%M:%S')" "$2" "$3" "$1" >>"$LOG_FILE" || true
+    printf '%s\n' "$(render_msg "${LOG_EARLY:-${now} [FATAL][EARLY] line={LINE} cmd='{CMD}' exit={EXIT}}" \
+      TIME "$now" LINE "$2" CMD "$3" EXIT "$1")" >>"$LOG_FILE" || true
   fi
   exit "$1"
 }
@@ -16,21 +30,70 @@ trap 'early_error $? $LINENO "$BASH_COMMAND"' ERR
 # ============================================================
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
+ENV_LOADED="0"
 
-if [[ ! -f "$ENV_FILE" ]]; then
-  echo "FATAL: .env not found: $ENV_FILE" >&2
-  exit 1
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+  ENV_LOADED="1"
 fi
-
-set -a
-# shellcheck disable=SC1090
-. "$ENV_FILE"
-set +a
 
 # ============================================================
 # DEFAULTS
 # ============================================================
 : "${PREFIX:="[monitor]"}"
+: "${TG_TOKEN:=""}"  # однофайловый режим: впишите токен сюда при необходимости
+: "${TG_CHAT:=""}"   # однофайловый режим: впишите chat id сюда при необходимости
+
+: "${MSG_HTTP_DOWN_SERVICE_UP:="❌ Сайт недоступен. HTTP {CODE}. Ошибка {FAILS}-й раз подряд. Служба {WEB} работает."}"
+: "${MSG_HTTP_DOWN_SERVICE_DOWN:="❌ Сайт недоступен. HTTP {CODE}. Ошибка {FAILS}-й раз подряд. Служба {WEB} не работает."}"
+: "${MSG_HTTP_DOWN_NO_SERVICE:="❌ Сайт недоступен. HTTP {CODE}. Ошибка {FAILS}-й раз подряд. Веб-сервис на сервере не обнаружен."}"
+: "${MSG_HTTP_RECOVERED:="✅ Сайт восстановился. Код: {CODE}. Время ответа: {TIME} сек"}"
+: "${MSG_METRIC_ALERT:="⚠️ {NAME}: {VALUE}% (порог {WARN}%)"}"
+: "${MSG_METRIC_RECOVERED:="✅ {NAME} нормализовался: {VALUE}%"}"
+: "${MSG_CONTAINER_DOWN:="❌ Контейнер {CT} остановлен"}"
+: "${MSG_CONTAINER_UP:="✅ Контейнер {CT} снова запущен"}"
+: "${MSG_SERVICE_RECOVER_HTTP_DOWN:="⚠️ Служба {WEB} восстановилась, но сайт все еще недоступен."}"
+: "${MSG_SERVICE_STOPPED_AFTER_HTTP_DOWN:="❌ Сайт недоступен и служба {WEB} остановилась после этого."}"
+
+: "${NAME_CPU:="Нагрузка CPU"}"
+: "${NAME_RAM:="Оперативная память"}"
+: "${NAME_DISK:="Диск /"}"
+: "${NAME_SWAP:="Swap-память"}"
+
+: "${ERR_EARLY_STDERR:="{TIME} [FATAL][EARLY] line={LINE} cmd='{CMD}' exit={EXIT}"}"
+: "${LOG_EARLY:="{TIME} [FATAL][EARLY] line={LINE} cmd='{CMD}' exit={EXIT}"}"
+: "${WARN_ENV_MISSING:="WARN: .env not found: {FILE}. Using defaults."}"
+: "${LOG_ENV_MISSING:=".env not found: {FILE}. Using defaults."}"
+: "${ERR_CMD_REQUIRED:="FATAL: {CMD} is required"}"
+: "${ERR_FATAL_STDERR:="[FATAL] line={LINE} cmd='{CMD}' exit={EXIT}"}"
+: "${LOG_FATAL_ON_ERROR:="{HOST}:{SCRIPT}:{LINE} cmd='{CMD}' exit={EXIT}"}"
+
+: "${WARN_TG_NOT_CONFIGURED:="WARN: Telegram is not configured (TG_TOKEN/TG_CHAT are empty)"}"
+: "${WARN_URL_MISSING_HTTP_ENABLED:="WARN: ENABLE_HTTP_MONITOR=1 but URL is not set"}"
+: "${WARN_URL_AND_NO_WEB:="WARN: URL is not set and no web service detected"}"
+
+: "${LOG_TG_NOT_CONFIGURED:="Telegram is not configured (TG_TOKEN/TG_CHAT are empty)"}"
+: "${LOG_HTTP_FAIL:="HTTP check failed: code={CODE}, fails={FAILS}, threshold={THRESHOLD}"}"
+: "${LOG_URL_DOWN_SERVICE_UP:="URL down but service {WEB} is running"}"
+: "${LOG_URL_DOWN_SERVICE_DOWN:="URL down and service {WEB} is not running"}"
+: "${LOG_URL_DOWN_NO_SERVICE:="URL down and no web service detected"}"
+: "${LOG_METRIC_ALERT:="{NAME} alert: {VALUE}%"}"
+: "${LOG_CONTAINER_STOPPED:="Container {CT} stopped"}"
+: "${LOG_SERVICE_RECOVER_HTTP_DOWN:="Service {WEB} recovered but HTTP is still down"}"
+: "${LOG_ROTATED:="Log rotated (kept last {LINES} lines)"}"
+: "${LOG_STATE_CREATED:="State file created"}"
+: "${LOG_TG_SEND_FAILED:="Failed to send Telegram message"}"
+: "${LOG_HTTP_DOWN_CONFIRMED:="HTTP DOWN confirmed (code={CODE})"}"
+: "${LOG_HTTP_RECOVERED:="HTTP recovered, time={TIME}s, code={CODE}"}"
+: "${LOG_METRIC_RECOVERED:="{NAME} recovered: {VALUE}%"}"
+: "${LOG_CONTAINER_STARTED:="Container {CT} started"}"
+: "${LOG_MONITOR_STARTED:="Monitor run started"}"
+: "${LOG_MONITOR_FINISHED:="Monitor run finished"}"
+: "${LOG_HTTP_AND_SERVICE_DOWN:="HTTP already down and service {WEB} is now stopped"}"
+: "${LOG_ANOTHER_INSTANCE:="Another instance is running, exiting"}"
 
 : "${STATE_FILE:=$HOME/.local/state/monitor/state.json}"
 : "${LOG_FILE:=$HOME/.local/state/monitor/monitor.log}"
@@ -66,13 +129,20 @@ log() {
   printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$*" >>"$LOG_FILE"
 }
 
-# ============================================================
-# VALIDATION
-# ============================================================
+if [[ "$ENV_LOADED" == "0" ]]; then
+  echo "$(render_msg "$WARN_ENV_MISSING" FILE "$ENV_FILE")" >&2
+  log WARN "$(render_msg "$LOG_ENV_MISSING" FILE "$ENV_FILE")"
+fi
+
 # ============================================================
 # REQUIREMENTS
 # ============================================================
-require_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "FATAL: $1 is required" >&2; exit 1; }; }
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "$(render_msg "$ERR_CMD_REQUIRED" CMD "$1")" >&2
+    exit 1
+  }
+}
 require_cmd jq
 require_cmd curl
 require_cmd flock
@@ -80,12 +150,10 @@ require_cmd awk
 require_cmd df
 require_cmd sed
 
-log INFO "Logging initialized"
-
 on_error() {
   trap - ERR
-  log FATAL "$(hostname):$0:$2 cmd='$3' exit=$1" || true
-  echo "[FATAL] line=$2 cmd='$3' exit=$1" >&2
+  log FATAL "$(render_msg "$LOG_FATAL_ON_ERROR" HOST "$(hostname)" SCRIPT "$0" LINE "$2" CMD "$3" EXIT "$1")" || true
+  echo "$(render_msg "$ERR_FATAL_STDERR" LINE "$2" CMD "$3" EXIT "$1")" >&2
   exit "$1"
 }
 trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
@@ -104,7 +172,7 @@ rotate_log_if_needed() {
 
   if [[ "$size" -gt "$LOG_MAX_SIZE" ]]; then
     tail -n "$LOG_KEEP_LINES" "$LOG_FILE" >"${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
-    log INFO "Log rotated (kept last ${LOG_KEEP_LINES} lines)"
+    log INFO "$(render_msg "$LOG_ROTATED" LINES "$LOG_KEEP_LINES")"
   fi
 }
 
@@ -126,7 +194,7 @@ init_state() {
       warnings: {},
       web: { down: false, name: "" }
     }' >"$STATE_FILE"
-    log INFO "State file created"
+    log INFO "$(render_msg "$LOG_STATE_CREATED")"
   fi
 }
 
@@ -148,7 +216,7 @@ send_msg() {
   fi
   curl -sS -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
     -d chat_id="${TG_CHAT}" \
-    --data-urlencode text="${PREFIX} $1" >/dev/null || log ERROR "Failed to send Telegram message"
+    --data-urlencode text="${PREFIX} $1" >/dev/null || log ERROR "$(render_msg "$LOG_TG_SEND_FAILED")"
 }
 
 # ============================================================
@@ -203,13 +271,11 @@ disk_usage_pct() {
 WEB_FOUND="false"
 WEB_ACTIVE="false"
 WEB_NAME=""
-WEB_SOURCE=""
 
 detect_web_service() {
   WEB_FOUND="false"
   WEB_ACTIVE="false"
   WEB_NAME=""
-  WEB_SOURCE=""
 
   local unit
   if command -v systemctl >/dev/null 2>&1; then
@@ -228,7 +294,6 @@ detect_web_service() {
       if systemctl list-unit-files "${unit}.service" --no-legend --no-pager >/dev/null 2>&1; then
         WEB_FOUND="true"
         WEB_NAME="${unit}.service"
-        WEB_SOURCE="systemd"
         if systemctl is-active --quiet "${unit}.service"; then
           WEB_ACTIVE="true"
         fi
@@ -259,14 +324,11 @@ detect_web_service() {
       unit_from_pid="$(systemctl status "$pid" --no-pager 2>/dev/null | awk 'NR==1 {gsub("●",""); print $1}')"
       if [[ -n "$unit_from_pid" ]]; then
         WEB_NAME="$unit_from_pid"
-        WEB_SOURCE="systemd"
       else
         WEB_NAME="$proc"
-        WEB_SOURCE="listener"
       fi
     else
       WEB_NAME="$proc"
-      WEB_SOURCE="listener"
     fi
 
     WEB_FOUND="true"
@@ -302,23 +364,23 @@ http_check() {
     state_apply ".http.fail_count = ${FAILS}"
 
     if (( FAILS == 1 )); then
-      log WARN "HTTP check failed: code=${CODE}, fails=${FAILS}, threshold=${HTTP_FAIL_THRESHOLD}"
+      log WARN "$(render_msg "$LOG_HTTP_FAIL" CODE "$CODE" FAILS "$FAILS" THRESHOLD "$HTTP_FAIL_THRESHOLD")"
     fi
 
     if (( FAILS >= HTTP_FAIL_THRESHOLD )) && [[ "$DOWN" == "false" ]]; then
       state_apply ".http.down = true"
-      log ERROR "HTTP DOWN confirmed (code=${CODE})"
+      log ERROR "$(render_msg "$LOG_HTTP_DOWN_CONFIRMED" CODE "$CODE")"
       if [[ "$WEB_FOUND" == "true" ]]; then
         if [[ "$WEB_ACTIVE" == "true" ]]; then
-          log WARN "URL down but service ${WEB_NAME} is running"
-          send_msg "❌ Сайт недоступен. HTTP ${CODE}. Ошибка ${FAILS}-й раз подряд. Служба ${WEB_NAME} работает."
+          log WARN "$(render_msg "$LOG_URL_DOWN_SERVICE_UP" WEB "$WEB_NAME")"
+          send_msg "$(render_msg "$MSG_HTTP_DOWN_SERVICE_UP" CODE "$CODE" FAILS "$FAILS" WEB "$WEB_NAME")"
         else
-          log ERROR "URL down and service ${WEB_NAME} is not running"
-          send_msg "❌ Сайт недоступен. HTTP ${CODE}. Ошибка ${FAILS}-й раз подряд. Служба ${WEB_NAME} не работает."
+          log ERROR "$(render_msg "$LOG_URL_DOWN_SERVICE_DOWN" WEB "$WEB_NAME")"
+          send_msg "$(render_msg "$MSG_HTTP_DOWN_SERVICE_DOWN" CODE "$CODE" FAILS "$FAILS" WEB "$WEB_NAME")"
         fi
       else
-        log WARN "URL down and no web service detected"
-        send_msg "❌ Сайт недоступен. HTTP ${CODE}. Ошибка ${FAILS}-й раз подряд. Веб-сервис на сервере не обнаружен."
+        log WARN "$(render_msg "$LOG_URL_DOWN_NO_SERVICE")"
+        send_msg "$(render_msg "$MSG_HTTP_DOWN_NO_SERVICE" CODE "$CODE" FAILS "$FAILS")"
       fi
     fi
     return 0
@@ -331,8 +393,8 @@ http_check() {
 
   if [[ "$DOWN" == "true" ]]; then
     state_apply ".http.down = false"
-    log INFO "HTTP recovered, time=${TIME_FMT}s, code=${CODE}"
-    send_msg "✅ Сайт восстановился. Код: ${CODE}. Время ответа: ${TIME_FMT} сек"
+    log INFO "$(render_msg "$LOG_HTTP_RECOVERED" TIME "$TIME_FMT" CODE "$CODE")"
+    send_msg "$(render_msg "$MSG_HTTP_RECOVERED" CODE "$CODE" TIME "$TIME_FMT")"
   fi
 }
 
@@ -347,12 +409,12 @@ check_metric() {
 
   if (( value >= warn )) && [[ "$alert" == "false" ]]; then
     state_apply "${path}.alert = true | ${path}.last = ${value}"
-    log WARN "${name} alert: ${value}%"
-    send_msg "⚠️ ${name}: ${value}% (порог ${warn}%)"
+    log WARN "$(render_msg "$LOG_METRIC_ALERT" NAME "$name" VALUE "$value")"
+    send_msg "$(render_msg "$MSG_METRIC_ALERT" NAME "$name" VALUE "$value" WARN "$warn")"
   elif (( value <= recover )) && [[ "$alert" == "true" ]]; then
     state_apply "${path}.alert = false | ${path}.last = ${value}"
-    log INFO "${name} recovered: ${value}%"
-    send_msg "✅ ${name} нормализовался: ${value}%"
+    log INFO "$(render_msg "$LOG_METRIC_RECOVERED" NAME "$name" VALUE "$value")"
+    send_msg "$(render_msg "$MSG_METRIC_RECOVERED" NAME "$name" VALUE "$value")"
   fi
 }
 
@@ -365,10 +427,10 @@ host_check() {
   DISK="$(disk_usage_pct)"
   SWAP="$(swap_usage_pct)"
 
-  check_metric "Нагрузка CPU"        "$CPU"  "$CPU_WARN"  "$((CPU_WARN-10))"   ".host.cpu"
-  check_metric "Оперативная память"  "$RAM"  "$MEM_WARN"  "$((MEM_WARN-10))"   ".host.ram"
-  check_metric "Диск /"              "$DISK" "$DISK_WARN" "$((DISK_WARN-5))"   ".host.disk"
-  check_metric "Swap-память"         "$SWAP" "$SWAP_WARN" "$((SWAP_WARN-10))"  ".host.swap"
+  check_metric "$NAME_CPU"   "$CPU"  "$CPU_WARN"  "$((CPU_WARN-10))"   ".host.cpu"
+  check_metric "$NAME_RAM"   "$RAM"  "$MEM_WARN"  "$((MEM_WARN-10))"   ".host.ram"
+  check_metric "$NAME_DISK"  "$DISK" "$DISK_WARN" "$((DISK_WARN-5))"   ".host.disk"
+  check_metric "$NAME_SWAP"  "$SWAP" "$SWAP_WARN" "$((SWAP_WARN-10))"  ".host.swap"
 }
 
 # ============================================================
@@ -395,12 +457,12 @@ container_check() {
 
     if [[ "$RUNNING" != "true" && "$DOWN" == "false" ]]; then
       state_apply ".containers[\"$key\"].down = true"
-      log WARN "Container ${ct} stopped"
-      send_msg "❌ Контейнер ${ct} остановлен"
+      log WARN "$(render_msg "$LOG_CONTAINER_STOPPED" CT "$ct")"
+      send_msg "$(render_msg "$MSG_CONTAINER_DOWN" CT "$ct")"
     elif [[ "$RUNNING" == "true" && "$DOWN" == "true" ]]; then
       state_apply ".containers[\"$key\"].down = false"
-      log INFO "Container ${ct} started"
-      send_msg "✅ Контейнер ${ct} снова запущен"
+      log INFO "$(render_msg "$LOG_CONTAINER_STARTED" CT "$ct")"
+      send_msg "$(render_msg "$MSG_CONTAINER_UP" CT "$ct")"
     fi
   done
 }
@@ -409,20 +471,20 @@ container_check() {
 # MAIN
 # ============================================================
 exec 9>"$LOCK_FILE"
-flock -n 9 || { log WARN "Another instance is running, exiting"; exit 0; }
+flock -n 9 || { log WARN "$(render_msg "$LOG_ANOTHER_INSTANCE")"; exit 0; }
 
 init_state
 rotate_log_if_needed
 
-log INFO "Monitor run started"
+log INFO "$(render_msg "$LOG_MONITOR_STARTED")"
+now_ts="$(date +%s)"
 if [[ -z "${TG_TOKEN:-}" || -z "${TG_CHAT:-}" ]]; then
-  echo "WARN: Telegram is not configured (TG_TOKEN/TG_CHAT are empty)" >&2
+  echo "$WARN_TG_NOT_CONFIGURED" >&2
   state_apply '.telegram.warn_missing_ts //= 0'
   last_warn="$(state_get '.telegram.warn_missing_ts')"
   last_warn="${last_warn:-0}"
-  now_ts="$(date +%s)"
   if (( now_ts - last_warn >= 86400 )); then
-    log WARN "Telegram is not configured (TG_TOKEN/TG_CHAT are empty)"
+    log WARN "$(render_msg "$LOG_TG_NOT_CONFIGURED")"
     state_apply ".telegram.warn_missing_ts = ${now_ts}"
   fi
 fi
@@ -430,25 +492,25 @@ detect_web_service
 state_apply '.web.down //= false | .web.name //= ""'
 prev_web_down="$(state_get '.web.down')"; prev_web_down="${prev_web_down:-false}"
 prev_web_name="$(state_get '.web.name')"; prev_web_name="${prev_web_name:-}"
-  if [[ "$WEB_FOUND" == "true" ]]; then
-    state_apply ".web.name = \"${WEB_NAME}\""
-    if [[ "$WEB_ACTIVE" == "true" ]]; then
+if [[ "$WEB_FOUND" == "true" ]]; then
+  state_apply ".web.name = \"${WEB_NAME}\""
+  if [[ "$WEB_ACTIVE" == "true" ]]; then
       if [[ "$prev_web_down" == "true" ]]; then
         state_apply '.web.down = false'
         http_down_now="$(state_get '.http.down')"; http_down_now="${http_down_now:-false}"
         if [[ "$http_down_now" == "true" ]]; then
-          log WARN "Service ${WEB_NAME} recovered but HTTP is still down"
-          send_msg "⚠️ Служба ${WEB_NAME} восстановилась, но сайт все еще недоступен."
+          log WARN "$(render_msg "$LOG_SERVICE_RECOVER_HTTP_DOWN" WEB "$WEB_NAME")"
+          send_msg "$(render_msg "$MSG_SERVICE_RECOVER_HTTP_DOWN" WEB "$WEB_NAME")"
         fi
       fi
     else
-      if [[ "$prev_web_down" == "false" ]]; then
-        state_apply '.web.down = true'
-      fi
+    if [[ "$prev_web_down" == "false" ]]; then
+      state_apply '.web.down = true'
+    fi
     http_down_now="$(state_get '.http.down')"; http_down_now="${http_down_now:-false}"
     if [[ "$http_down_now" == "true" && "$prev_web_down" == "false" ]]; then
-      log ERROR "HTTP already down and service ${WEB_NAME} is now stopped"
-      send_msg "❌ Сайт недоступен и служба ${WEB_NAME} остановилась после этого."
+      log ERROR "$(render_msg "$LOG_HTTP_AND_SERVICE_DOWN" WEB "$WEB_NAME")"
+      send_msg "$(render_msg "$MSG_SERVICE_STOPPED_AFTER_HTTP_DOWN" WEB "$WEB_NAME")"
     fi
   fi
 else
@@ -457,25 +519,24 @@ else
   fi
 fi
 state_apply '.warnings.missing_url_ts //= 0 | .warnings.no_web_service_ts //= 0'
-now_ts="$(date +%s)"
 if [[ "${ENABLE_HTTP_MONITOR:-0}" -eq 1 && -z "${URL:-}" ]]; then
-  echo "WARN: ENABLE_HTTP_MONITOR=1 but URL is not set" >&2
+  echo "$WARN_URL_MISSING_HTTP_ENABLED" >&2
   last_warn="$(state_get '.warnings.missing_url_ts')"; last_warn="${last_warn:-0}"
   if (( now_ts - last_warn >= 86400 )); then
-    log WARN "ENABLE_HTTP_MONITOR=1 but URL is not set"
+    log WARN "$(render_msg "$WARN_URL_MISSING_HTTP_ENABLED")"
     state_apply ".warnings.missing_url_ts = ${now_ts}"
   fi
 fi
 if [[ "$WEB_FOUND" == "false" && -z "${URL:-}" ]]; then
-  echo "WARN: URL is not set and no web service detected" >&2
+  echo "$WARN_URL_AND_NO_WEB" >&2
   last_warn="$(state_get '.warnings.no_web_service_ts')"; last_warn="${last_warn:-0}"
   if (( now_ts - last_warn >= 86400 )); then
-    log WARN "No web service detected and URL is not set"
+    log WARN "$(render_msg "$WARN_URL_AND_NO_WEB")"
     state_apply ".warnings.no_web_service_ts = ${now_ts}"
   fi
 fi
 http_check
 host_check
 container_check
-log INFO "Monitor run finished"
+log INFO "$(render_msg "$LOG_MONITOR_FINISHED")"
 exit 0
