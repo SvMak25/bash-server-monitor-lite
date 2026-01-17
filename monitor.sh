@@ -1,6 +1,32 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+  PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+elif [[ -z "${PATH:-}" ]]; then
+  PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+else
+  PATH="${PATH}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+fi
+
+resolve_home() {
+  local uid
+  uid="$(id -u)"
+  if command -v getent >/dev/null 2>&1; then
+    getent passwd "$uid" | cut -d: -f6
+  else
+    awk -F: -v uid="$uid" '$3==uid{print $6}' /etc/passwd 2>/dev/null
+  fi
+}
+
+if [[ -z "${HOME:-}" || "$HOME" == *'$'* ]]; then
+  RESOLVED_HOME="$(resolve_home)"
+  if [[ -n "$RESOLVED_HOME" ]]; then
+    HOME="$RESOLVED_HOME"
+    export HOME
+  fi
+fi
+
 render_msg() {
   local tpl="$1"; shift
   local key val
@@ -32,13 +58,89 @@ trap 'early_error $? $LINENO "$BASH_COMMAND"' ERR
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
 ENV_LOADED="0"
+ENV_MISSING="0"
+ENV_INSECURE="0"
+ENV_INSECURE_REASON=""
+
+env_is_secure() {
+  local file="$1"
+  ENV_INSECURE_REASON=""
+
+  if [[ -L "$file" ]]; then
+    ENV_INSECURE_REASON="symlink"
+    return 1
+  fi
+  if [[ ! -f "$file" ]]; then
+    ENV_INSECURE_REASON="not a regular file"
+    return 1
+  fi
+  if ! command -v stat >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local mode owner type uid
+  read -r mode owner type < <(stat -c '%a %u %F' "$file" 2>/dev/null || echo "??? ??? ???")
+  uid="$(id -u)"
+
+  if [[ "$type" != "regular file" ]]; then
+    ENV_INSECURE_REASON="not a regular file"
+    return 1
+  fi
+  if [[ "$owner" != "$uid" ]]; then
+    ENV_INSECURE_REASON="owner=${owner} expected=${uid}"
+    return 1
+  fi
+  if (( mode % 100 != 0 )); then
+    ENV_INSECURE_REASON="mode=${mode} expected 600/400"
+    return 1
+  fi
+  return 0
+}
+
+load_env_file() {
+  local file="$1"
+  local loaded="0"
+  local line key val
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+    if [[ "$line" == export* ]]; then
+      line="${line#export}"
+      line="${line#"${line%%[![:space:]]*}"}"
+    fi
+    if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      key="${line%%=*}"
+      val="${line#*=}"
+      if [[ "$val" == \"*\" && "$val" == *\" ]]; then
+        val="${val:1:${#val}-2}"
+      elif [[ "$val" == \'*\' && "$val" == *\' ]]; then
+        val="${val:1:${#val}-2}"
+      fi
+      if [[ -n "${HOME:-}" ]]; then
+        val="${val//\$\{HOME\}/$HOME}"
+        val="${val//\$HOME/$HOME}"
+      fi
+      printf -v "$key" '%s' "$val"
+      export "$key"
+      loaded="1"
+    fi
+  done < "$file"
+
+  if [[ "$loaded" == "1" ]]; then
+    ENV_LOADED="1"
+  fi
+}
 
 if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
-  set +a
-  ENV_LOADED="1"
+  if [[ "${ENV_ALLOW_INSECURE:-0}" == "1" ]] || env_is_secure "$ENV_FILE"; then
+    load_env_file "$ENV_FILE"
+  else
+    ENV_INSECURE="1"
+  fi
+else
+  ENV_MISSING="1"
 fi
 
 # ============================================================
@@ -69,8 +171,11 @@ fi
 : "${ERR_EARLY_STDERR:="{TIME} [FATAL][EARLY] line={LINE} cmd='{CMD}' exit={EXIT}"}"
 : "${LOG_EARLY:="{TIME} [FATAL][EARLY] line={LINE} cmd='{CMD}' exit={EXIT}"}"
 : "${WARN_ENV_MISSING:="WARN: .env not found: {FILE}. Using defaults."}"
+: "${WARN_ENV_INSECURE:="WARN: .env not loaded (insecure permissions): {FILE} ({REASON})"}"
 : "${LOG_ENV_MISSING:=".env not found: {FILE}. Using defaults."}"
+: "${LOG_ENV_INSECURE:=".env not loaded (insecure permissions): {FILE} ({REASON})"}"
 : "${ERR_CMD_REQUIRED:="FATAL: {CMD} is required"}"
+: "${ERR_UNSAFE_PATH:="FATAL: insecure path {FILE} (dir={DIR} reason={REASON})"}"
 : "${ERR_FATAL_STDERR:="[FATAL] line={LINE} cmd='{CMD}' exit={EXIT}"}"
 : "${LOG_FATAL_ON_ERROR:="{HOST}:{SCRIPT}:{LINE} cmd='{CMD}' exit={EXIT}"}"
 
@@ -123,11 +228,60 @@ fi
 : "${SWAP_WARN:=60}"
 
 : "${CONTAINERS:=}"
+: "${ENV_ALLOW_INSECURE:=0}"
 
 # ============================================================
 # PREPARE DIRS
 # ============================================================
-mkdir -p "$(dirname "$STATE_FILE")" "$(dirname "$LOG_FILE")"
+assert_safe_dir() {
+  local dir="$1"
+  local file="$2"
+  PATH_UNSAFE_REASON=""
+  [[ "${EUID:-$(id -u)}" -eq 0 ]] || return 0
+  [[ -n "$dir" ]] || return 1
+  if [[ -L "$dir" ]]; then
+    PATH_UNSAFE_REASON="symlink"
+    return 1
+  fi
+  [[ -d "$dir" ]] || return 0
+  if ! command -v stat >/dev/null 2>&1; then
+    return 0
+  fi
+  local mode owner type group_digit other_digit
+  read -r mode owner type < <(stat -c '%a %u %F' "$dir" 2>/dev/null || echo "??? ??? ???")
+  if [[ "$type" != "directory" ]]; then
+    PATH_UNSAFE_REASON="not a directory"
+    return 1
+  fi
+  if [[ "$owner" != "0" ]]; then
+    PATH_UNSAFE_REASON="owner=${owner} expected=0"
+    return 1
+  fi
+  group_digit=$(( (mode / 10) % 10 ))
+  other_digit=$(( mode % 10 ))
+  if (( (group_digit & 2) || (other_digit & 2) )); then
+    PATH_UNSAFE_REASON="mode=${mode} group/other writable"
+    return 1
+  fi
+  return 0
+}
+
+STATE_DIR="$(dirname "$STATE_FILE")"
+LOG_DIR="$(dirname "$LOG_FILE")"
+LOCK_DIR="$(dirname "$LOCK_FILE")"
+mkdir -p "$STATE_DIR" "$LOG_DIR" "$LOCK_DIR"
+if ! assert_safe_dir "$STATE_DIR" "$STATE_FILE"; then
+  printf '%s\n' "$(render_msg "$ERR_UNSAFE_PATH" FILE "$STATE_FILE" DIR "$STATE_DIR" REASON "$PATH_UNSAFE_REASON")" >&2
+  exit 1
+fi
+if ! assert_safe_dir "$LOG_DIR" "$LOG_FILE"; then
+  printf '%s\n' "$(render_msg "$ERR_UNSAFE_PATH" FILE "$LOG_FILE" DIR "$LOG_DIR" REASON "$PATH_UNSAFE_REASON")" >&2
+  exit 1
+fi
+if ! assert_safe_dir "$LOCK_DIR" "$LOCK_FILE"; then
+  printf '%s\n' "$(render_msg "$ERR_UNSAFE_PATH" FILE "$LOCK_FILE" DIR "$LOCK_DIR" REASON "$PATH_UNSAFE_REASON")" >&2
+  exit 1
+fi
 touch "$LOG_FILE" 2>/dev/null || true
 
 # ============================================================
@@ -138,9 +292,13 @@ log() {
   printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$*" >>"$LOG_FILE" || true
 }
 
-if [[ "$ENV_LOADED" == "0" ]]; then
+if [[ "$ENV_MISSING" == "1" ]]; then
   printf '%s\n' "$(render_msg "$WARN_ENV_MISSING" FILE "$ENV_FILE")" >&2
   log WARN "$(render_msg "$LOG_ENV_MISSING" FILE "$ENV_FILE")"
+fi
+if [[ "$ENV_INSECURE" == "1" ]]; then
+  printf '%s\n' "$(render_msg "$WARN_ENV_INSECURE" FILE "$ENV_FILE" REASON "$ENV_INSECURE_REASON")" >&2
+  log WARN "$(render_msg "$LOG_ENV_INSECURE" FILE "$ENV_FILE" REASON "$ENV_INSECURE_REASON")"
 fi
 
 # ============================================================

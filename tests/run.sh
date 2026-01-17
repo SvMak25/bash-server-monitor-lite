@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TMP_DIR="$(mktemp -d "${ROOT}/.tmp.test.XXXXXX")"
+TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -p "${ROOT}" .tmp.test.XXXXXX)"
 TEST_HOME="${TMP_DIR}/home"
 mkdir -p "$TEST_HOME"
 
