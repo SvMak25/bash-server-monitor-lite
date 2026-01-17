@@ -64,6 +64,8 @@
 ├── .env.example      # Пример конфигурации
 ├── Makefile          # Линт и простые тесты
 ├── tests/            # Моки и smoke-тесты
+│   ├── run.sh         # Smoke-тесты
+│   └── mocks/          # Моки systemctl/ss/curl
 └── README.md
 ```
 
