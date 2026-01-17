@@ -12,10 +12,11 @@ render_msg() {
   printf '%s' "$tpl"
 }
 
+# shellcheck disable=SC2317,SC2329
 early_error() {
   local now
   now="$(date '+%F %T')"
-  echo "$(render_msg "${ERR_EARLY_STDERR:-${now} [FATAL][EARLY] line={LINE} cmd='{CMD}' exit={EXIT}}" \
+  printf '%s\n' "$(render_msg "${ERR_EARLY_STDERR:-${now} [FATAL][EARLY] line={LINE} cmd='{CMD}' exit={EXIT}}" \
     TIME "$now" LINE "$2" CMD "$3" EXIT "$1")" >&2
   if [[ -n "${LOG_FILE:-}" ]]; then
     printf '%s\n' "$(render_msg "${LOG_EARLY:-${now} [FATAL][EARLY] line={LINE} cmd='{CMD}' exit={EXIT}}" \
@@ -130,7 +131,7 @@ log() {
 }
 
 if [[ "$ENV_LOADED" == "0" ]]; then
-  echo "$(render_msg "$WARN_ENV_MISSING" FILE "$ENV_FILE")" >&2
+  printf '%s\n' "$(render_msg "$WARN_ENV_MISSING" FILE "$ENV_FILE")" >&2
   log WARN "$(render_msg "$LOG_ENV_MISSING" FILE "$ENV_FILE")"
 fi
 
@@ -139,7 +140,7 @@ fi
 # ============================================================
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
-    echo "$(render_msg "$ERR_CMD_REQUIRED" CMD "$1")" >&2
+    printf '%s\n' "$(render_msg "$ERR_CMD_REQUIRED" CMD "$1")" >&2
     exit 1
   }
 }
@@ -150,10 +151,11 @@ require_cmd awk
 require_cmd df
 require_cmd sed
 
+# shellcheck disable=SC2317,SC2329
 on_error() {
   trap - ERR
   log FATAL "$(render_msg "$LOG_FATAL_ON_ERROR" HOST "$(hostname)" SCRIPT "$0" LINE "$2" CMD "$3" EXIT "$1")" || true
-  echo "$(render_msg "$ERR_FATAL_STDERR" LINE "$2" CMD "$3" EXIT "$1")" >&2
+  printf '%s\n' "$(render_msg "$ERR_FATAL_STDERR" LINE "$2" CMD "$3" EXIT "$1")" >&2
   exit "$1"
 }
 trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
@@ -225,15 +227,15 @@ send_msg() {
 cpu_usage_pct() {
   # delta over short interval (иначе будет "среднее с момента загрузки")
   local -i idle1 total1 idle2 total2
-  local cpu user nice system idle iowait irq softirq steal
+  local user nice system idle iowait irq softirq steal
 
-  read -r cpu user nice system idle iowait irq softirq steal _ < /proc/stat
+  read -r _ user nice system idle iowait irq softirq steal _ < /proc/stat
   total1=$((user + nice + system + idle + iowait + irq + softirq + steal))
   idle1=$((idle + iowait))
 
   sleep 0.2
 
-  read -r cpu user nice system idle iowait irq softirq steal _ < /proc/stat
+  read -r _ user nice system idle iowait irq softirq steal _ < /proc/stat
   total2=$((user + nice + system + idle + iowait + irq + softirq + steal))
   idle2=$((idle + iowait))
 
@@ -449,7 +451,7 @@ container_check() {
     ct="${ct//[[:space:]]/}"
     [[ -n "$ct" ]] || continue
 
-    key="$(echo "$ct" | sed 's/[^a-zA-Z0-9]/_/g')"
+    key="${ct//[^a-zA-Z0-9]/_}"
     state_apply ".containers[\"$key\"] //= { down: false }"
 
     DOWN="$(state_get ".containers[\"$key\"].down")"; DOWN="${DOWN:-false}"

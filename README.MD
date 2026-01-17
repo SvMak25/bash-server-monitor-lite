@@ -1,5 +1,7 @@
 # Server Monitor & Bootstrap
 
+![ShellCheck](https://github.com/ger-balakirau/bash-server-monitor-lite/actions/workflows/shellcheck.yml/badge.svg)
+
 Набор bash-скриптов для:
 
 - **подготовки системы** (bootstrap: установка утилит);
@@ -60,6 +62,8 @@
 ├── bootstrap.sh      # Установка необходимых утилит/зависимостей
 ├── monitor.sh        # Мониторинг (CPU, RAM, Disk, HTTP, Docker) + Telegram алерты
 ├── .env.example      # Пример конфигурации
+├── Makefile          # Линт и простые тесты
+├── tests/            # Моки и smoke-тесты
 └── README.md
 ```
 
@@ -198,12 +202,13 @@ chmod +x monitor.sh
 
 Варианты:
 
-1) Передать через окружение при запуске:
+1. Передать через окружение при запуске:
+
 ```bash
 TG_TOKEN="123:ABC" TG_CHAT="987654321" URL="https://example.com" ./monitor.sh
 ```
 
-2) Прописать переменные прямо в начале `monitor.sh` (для однофайловой поставки).
+2. Прописать переменные прямо в начале `monitor.sh` (для однофайловой поставки).
 
 ---
 
@@ -256,9 +261,18 @@ CONTAINERS="nginx, mysql, redis"
 
 ---
 
+## Design decisions
+
+- **JSON state**: хранит состояние между запусками (down/up, fail counters, алерты) без внешней БД.
+- **Пороговые значения + гистерезис**: уменьшают “дребезг” при колебаниях около порога.
+- **Оповещения и логи в env**: позволяют легко менять язык и формулировки без правки кода.
+
+---
+
 ### Пояснения по настройкам
 
 #### ENABLE_HTTP_MONITOR / ENABLE_HOST_MONITOR / ENABLE_DOCKER_MONITOR
+
 Включают/выключают блоки проверок:
 
 - `ENABLE_HTTP_MONITOR=1` — проверка доступности `URL` и алертинг падения/восстановления
@@ -266,12 +280,14 @@ CONTAINERS="nginx, mysql, redis"
 - `ENABLE_DOCKER_MONITOR=1` — мониторинг контейнеров из `CONTAINERS` (опционально)
 
 Значения:
+
 - `1` — включено
 - `0` — выключено
 
 ---
 
 #### HTTP monitor
+
 Рекомендации:
 
 - используйте **health endpoint** (например `/health`, `/ping`), который:
@@ -290,6 +306,7 @@ CONTAINERS="nginx, mysql, redis"
 ---
 
 #### Host thresholds
+
 Пороги задаются в процентах:
 
 - `CPU_WARN` — алерт при высокой загрузке CPU
@@ -298,6 +315,7 @@ CONTAINERS="nginx, mysql, redis"
 - `SWAP_WARN` — алерт по swap
 
 Восстановление (“recovery”) в скрипте сделано с гистерезисом:
+
 - CPU/RAM: порог - 10%
 - Disk: порог - 5%
 - Swap: порог - 10%
@@ -307,6 +325,7 @@ CONTAINERS="nginx, mysql, redis"
 ---
 
 #### Docker monitor
+
 Включается только если:
 
 - `ENABLE_DOCKER_MONITOR=1`
@@ -314,9 +333,11 @@ CONTAINERS="nginx, mysql, redis"
 - `CONTAINERS` непустой
 
 `CONTAINERS` — список через запятую:
+
 - можно указывать **имя контейнера** (`nginx`) или **container id**.
 
 Пример:
+
 ```dotenv
 CONTAINERS="nginx, mysql, redis, 1a2b3c4d5e6f"
 ```
@@ -333,6 +354,7 @@ CONTAINERS="nginx, mysql, redis, 1a2b3c4d5e6f"
 - `ENV_FILE="${SCRIPT_DIR}/.env"` — ожидает `.env` **в той же папке**, что и `monitor.sh`
 
 Пример:
+
 ```text
 /opt/monitor/
   monitor.sh
@@ -340,15 +362,18 @@ CONTAINERS="nginx, mysql, redis, 1a2b3c4d5e6f"
 ```
 
 Запуск возможен из любого места:
+
 ```bash
 cd /tmp
 /opt/monitor/monitor.sh
 ```
 
 Если нужен `.env` в другом месте — измените строку:
+
 ```bash
 ENV_FILE="${SCRIPT_DIR}/.env"
 ```
+
 на нужный путь. Если `.env` отсутствует — скрипт продолжит работу с дефолтными настройками.
 
 ---
@@ -362,6 +387,7 @@ ENV_FILE="${SCRIPT_DIR}/.env"
 - `LOCK_FILE=$HOME/.local/state/monitor/monitor.lock` — блокировка от параллельных запусков
 
 Директории под `STATE_FILE` и `LOG_FILE` создаются автоматически:
+
 ```bash
 mkdir -p "$(dirname "$STATE_FILE")" "$(dirname "$LOG_FILE")"
 ```
@@ -458,18 +484,21 @@ sudo systemctl status server-monitor.timer
 ## Что мониторится
 
 ### HTTP
+
 - доступность `URL`;
 - таймаут (`HTTP_TIMEOUT`);
 - подтверждение падения после N ошибок подряд (`HTTP_FAIL_THRESHOLD`);
 - уведомление о падении и восстановлении.
 
 ### Хост
+
 - CPU
 - RAM
 - диск `/`
 - swap
 
 ### Docker (опционально)
+
 - состояние контейнеров по имени или ID из `CONTAINERS`.
 
 ---
@@ -479,48 +508,86 @@ sudo systemctl status server-monitor.timer
 Проект ориентирован на минимальный overhead и предсказуемое поведение в cron/systemd timer. Поэтому метрики берутся из стабильных системных источников Linux (в первую очередь `/proc`) и простых утилит с устойчивым форматом вывода.
 
 ### CPU: `/proc/stat`, а не `top`
+
 - `top` — интерактивный инструмент; даже в batch-режиме он тяжелее чтения `/proc`.
 - Формат вывода `top` зависит от версии/локали/настроек — парсинг хрупкий.
 - Для алертинга нужен корректный процент за интервал — проще считать дельту счётчиков из `/proc/stat`.
 
 ### RAM/Swap: `/proc/meminfo`, а не `free`
+
 - `free` — обёртка над теми же данными, но формат вывода зависит от версии и ключей.
 - `/proc/meminfo` — первичный стабильный источник, удобно парсится через `awk`.
 - Используется `MemAvailable` — практичнее, чем “free” в классическом смысле.
 
 ### Disk usage: `df -P`, а не `lsblk`
+
 - цель метрики — занятость файловой системы (`/`), а не инвентаризация устройств.
 - `lsblk` даёт дерево устройств/разделов и требует сложного парсинга.
 - `df -P` предоставляет POSIX-формат, устойчивый для парсинга.
 
 ### Почему не `mpstat/sar/vmstat` (sysstat)
+
 - дополнительные зависимости (часто отсутствуют на минимальных VPS);
 - некоторые сценарии требуют фоновых сборщиков, что противоречит модели “запуск и выход”;
 - форматы вывода зависят от версии — выше риск несовместимости.
 
 ---
 
+## ShellCheck
+
+Рекомендуется прогонять скрипт через ShellCheck:
+
+```bash
+shellcheck monitor.sh
+```
+
+---
+
+## Тесты / демо
+
+Простейшие тесты с моками `curl`/`systemctl` можно запустить через Makefile:
+
+```bash
+make test
+```
+
+Также доступна проверка линтером (если установлен ShellCheck):
+
+```bash
+make lint
+```
+
+---
+
 ## Troubleshooting
 
 ### `.env not found`
-Ошибка:
-- `FATAL: .env not found: ...`
+
+Сообщение:
+
+- `WARN: .env not found: ...`
 
 Решение:
-- убедитесь, что `.env` лежит **рядом с `monitor.sh`**;
+-- убедитесь, что `.env` лежит **рядом с `monitor.sh`**;
+
+- если `.env` отсутствует сознательно — это нормально, скрипт продолжит работу с дефолтами.
 - или измените `ENV_FILE` в скрипте.
 
 ---
 
 ### Нет утилит (`jq`, `curl`, `flock` и т.д.)
+
 Решение:
+
 - запустите `./bootstrap.sh`;
 - или установите утилиты вручную (в зависимости от дистрибутива).
 
 ---
 
 ### Не приходят сообщения в Telegram
+
 Проверьте:
+
 - `TG_TOKEN` корректен (и не “обрезан”);
 - `TG_CHAT` — именно numeric chat id;
 - бот “видит” чат (вы писали ему, он получал updates);
@@ -529,7 +596,9 @@ sudo systemctl status server-monitor.timer
 ---
 
 ### Docker мониторинг не срабатывает
+
 Проверьте:
+
 - `ENABLE_DOCKER_MONITOR=1`
 - установлен `docker` CLI
 - у пользователя, запускающего скрипт, есть права на docker (обычно группа `docker`)

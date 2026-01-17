@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+for arg in "$@"; do
+  if [[ "$arg" == *"api.telegram.org"* ]]; then
+    exit 0
+  fi
+done
+
+code="${MOCK_HTTP_CODE:-200}"
+time="${MOCK_HTTP_TIME:-0.1}"
+printf '%s %s' "$code" "$time"
