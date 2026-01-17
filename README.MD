@@ -267,6 +267,26 @@ CONTAINERS="nginx, mysql, redis"
 
 ---
 
+## Web services detection
+
+Скрипт проверяет распространенные web‑service через systemd и пишет в лог активные/неактивные списки:
+
+- активные: `LOG_WEB_ACTIVE`
+- неактивные: `LOG_WEB_INACTIVE`
+
+Списки логируются только при изменениях, чтобы уменьшить шум.
+
+Шаблонные юниты (`nginx@`, `apache2@`, `httpd@`) учитываются через их инстансы (`nginx@site.service`). Если инстансов нет, шаблон помечается как неактивный.
+
+Пример логов:
+
+```text
+2025-01-01 12:00:00 [INFO] Web services active: nginx.service,apache2.service
+2025-01-01 12:00:00 [WARN] Web services inactive: httpd.service
+```
+
+---
+
 ## Design decisions
 
 - **JSON state**: хранит состояние между запусками (down/up, fail counters, алерты) без внешней БД.

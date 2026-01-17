@@ -48,16 +48,18 @@ fi
 : "${TG_TOKEN:=""}"  # однофайловый режим: впишите токен сюда при необходимости
 : "${TG_CHAT:=""}"   # однофайловый режим: впишите chat id сюда при необходимости
 
-: "${MSG_HTTP_DOWN_SERVICE_UP:="❌ Сайт недоступен: {URL}. HTTP {CODE}. Ошибка {FAILS}-й раз подряд. Служба {WEB} работает."}"
-: "${MSG_HTTP_DOWN_SERVICE_DOWN:="❌ Сайт недоступен: {URL}. HTTP {CODE}. Ошибка {FAILS}-й раз подряд. Служба {WEB} не работает."}"
+: "${MSG_HTTP_DOWN_SERVICE_UP:="❌ Сайт недоступен: {URL}. HTTP {CODE}. Ошибка {FAILS}-й раз подряд. Активные: {WEB_ACTIVE}. Неактивные: {WEB_INACTIVE}."}"
+: "${MSG_HTTP_DOWN_SERVICE_DOWN:="❌ Сайт недоступен: {URL}. HTTP {CODE}. Ошибка {FAILS}-й раз подряд. Активные: {WEB_ACTIVE}. Неактивные: {WEB_INACTIVE}."}"
 : "${MSG_HTTP_DOWN_NO_SERVICE:="❌ Сайт недоступен: {URL}. HTTP {CODE}. Ошибка {FAILS}-й раз подряд. Веб-сервис на сервере не обнаружен."}"
 : "${MSG_HTTP_RECOVERED:="✅ Сайт восстановился: {URL}. Код: {CODE}. Время ответа: {TIME} сек"}"
+: "${MSG_HTTP_UP_SERVICE_DOWN:="⚠️ Сайт доступен: {URL}. Но службы остановлены: {WEB_INACTIVE}."}"
+: "${MSG_HTTP_UP_SERVICE_RECOVER:="✅ Сайт доступен: {URL}. Службы восстановлены: {WEB_ACTIVE}."}"
 : "${MSG_METRIC_ALERT:="⚠️ {NAME}: {VALUE}% (порог {WARN}%)"}"
 : "${MSG_METRIC_RECOVERED:="✅ {NAME} нормализовался: {VALUE}%"}"
 : "${MSG_CONTAINER_DOWN:="❌ Контейнер {CT} остановлен"}"
 : "${MSG_CONTAINER_UP:="✅ Контейнер {CT} снова запущен"}"
-: "${MSG_SERVICE_RECOVER_HTTP_DOWN:="⚠️ Служба {WEB} восстановилась, но сайт все еще недоступен."}"
-: "${MSG_SERVICE_STOPPED_AFTER_HTTP_DOWN:="❌ Сайт недоступен и служба {WEB} остановилась после этого."}"
+: "${MSG_SERVICE_RECOVER_HTTP_DOWN:="⚠️ Службы восстановились: {WEB_ACTIVE}. Но сайт все еще недоступен."}"
+: "${MSG_SERVICE_STOPPED_AFTER_HTTP_DOWN:="❌ Сайт недоступен и службы остановились: {WEB_INACTIVE}."}"
 
 : "${NAME_CPU:="Нагрузка CPU"}"
 : "${NAME_RAM:="Оперативная память"}"
@@ -81,9 +83,13 @@ fi
 : "${LOG_URL_DOWN_SERVICE_UP:="URL down for {URL}, service {WEB} is running"}"
 : "${LOG_URL_DOWN_SERVICE_DOWN:="URL down for {URL}, service {WEB} is not running"}"
 : "${LOG_URL_DOWN_NO_SERVICE:="URL down for {URL}, no web service detected"}"
+: "${LOG_HTTP_UP_SERVICE_DOWN:="URL up for {URL}, but services stopped: {WEB_INACTIVE}"}"
+: "${LOG_HTTP_UP_SERVICE_RECOVER:="URL up for {URL}, services recovered: {WEB_ACTIVE}"}"
 : "${LOG_METRIC_ALERT:="{NAME} alert: {VALUE}%"}"
 : "${LOG_CONTAINER_STOPPED:="Container {CT} stopped"}"
 : "${LOG_SERVICE_RECOVER_HTTP_DOWN:="Service {WEB} recovered but HTTP is still down for {URLS}"}"
+: "${LOG_WEB_ACTIVE:="Web services active: {WEB_ACTIVE}"}"
+: "${LOG_WEB_INACTIVE:="Web services inactive: {WEB_INACTIVE}"}"
 : "${LOG_ROTATED:="Log rotated (kept last {LINES} lines)"}"
 : "${LOG_STATE_CREATED:="State file created"}"
 : "${LOG_TG_SEND_FAILED:="Failed to send Telegram message"}"
@@ -196,7 +202,7 @@ init_state() {
       containers: {},
       telegram: { warn_missing_ts: 0 },
       warnings: {},
-      web: { down: false, name: "" }
+      web: { down: false, name: "", services: { active: [], inactive: [] } }
     }' >"$STATE_FILE"
     log INFO "$(render_msg "$LOG_STATE_CREATED")"
   fi
@@ -275,18 +281,32 @@ disk_usage_pct() {
 WEB_FOUND="false"
 WEB_ACTIVE="false"
 WEB_NAME=""
+WEB_ACTIVE_LIST=""
+WEB_INACTIVE_LIST=""
+WEB_ACTIVE_UNITS=()
+WEB_INACTIVE_UNITS=()
 
 detect_web_service() {
   WEB_FOUND="false"
   WEB_ACTIVE="false"
   WEB_NAME=""
+  WEB_ACTIVE_LIST=""
+  WEB_INACTIVE_LIST=""
+  WEB_ACTIVE_UNITS=()
+  WEB_INACTIVE_UNITS=()
 
   local unit
+  local found_units=()
+  local active_units=()
+  local inactive_units=()
   if command -v systemctl >/dev/null 2>&1; then
     local KNOWN_WEB_UNITS=(
       nginx
+      nginx@
       apache2
+      apache2@
       httpd
+      httpd@
       caddy
       traefik
       haproxy
@@ -295,15 +315,48 @@ detect_web_service() {
       openresty
     )
     for unit in "${KNOWN_WEB_UNITS[@]}"; do
-      if systemctl list-unit-files "${unit}.service" --no-legend --no-pager >/dev/null 2>&1; then
-        WEB_FOUND="true"
-        WEB_NAME="${unit}.service"
-        if systemctl is-active --quiet "${unit}.service"; then
-          WEB_ACTIVE="true"
+      if [[ "$unit" == *@ ]]; then
+        if systemctl list-unit-files "${unit}.service" --no-legend --no-pager >/dev/null 2>&1; then
+          found_units+=("${unit}.service")
+          while read -r inst active_state _; do
+            [[ -n "$inst" ]] || continue
+            if [[ "$active_state" == "active" ]]; then
+              active_units+=("$inst")
+            else
+              inactive_units+=("$inst")
+            fi
+          done < <(systemctl list-units --all "${unit}*.service" --no-legend --no-pager 2>/dev/null | awk '{print $1, $3}')
+          if (( ${#active_units[@]} == 0 )) && (( ${#inactive_units[@]} == 0 )); then
+            inactive_units+=("${unit}.service")
+          fi
         fi
-        return 0
+      else
+        if systemctl list-unit-files "${unit}.service" --no-legend --no-pager >/dev/null 2>&1; then
+          found_units+=("${unit}.service")
+          if systemctl is-active --quiet "${unit}.service"; then
+            active_units+=("${unit}.service")
+          else
+            inactive_units+=("${unit}.service")
+          fi
+        fi
       fi
     done
+    if (( ${#found_units[@]} > 0 )); then
+      WEB_FOUND="true"
+      if (( ${#active_units[@]} > 0 )); then
+        WEB_ACTIVE="true"
+        WEB_ACTIVE_UNITS=("${active_units[@]}")
+        WEB_INACTIVE_UNITS=("${inactive_units[@]}")
+        WEB_ACTIVE_LIST="$(IFS=,; echo "${active_units[*]}")"
+        WEB_INACTIVE_LIST="$(IFS=,; echo "${inactive_units[*]}")"
+        WEB_NAME="$WEB_ACTIVE_LIST"
+      else
+        WEB_INACTIVE_UNITS=("${inactive_units[@]}")
+        WEB_INACTIVE_LIST="$(IFS=,; echo "${inactive_units[*]}")"
+        WEB_NAME="$WEB_INACTIVE_LIST"
+      fi
+      return 0
+    fi
   fi
 
   local line proc pid unit_from_pid
@@ -337,6 +390,8 @@ detect_web_service() {
 
     WEB_FOUND="true"
     WEB_ACTIVE="true"
+    WEB_ACTIVE_UNITS=("$WEB_NAME")
+    WEB_ACTIVE_LIST="$WEB_NAME"
   fi
 }
 
@@ -367,7 +422,7 @@ http_check_one() {
   local key path FAILS DOWN
   key="${url//[^a-zA-Z0-9]/_}"
   path=".http.targets[\"$key\"]"
-  state_apply "${path} //= { down: false, fail_count: 0, url: \"${url}\" }"
+  state_apply "${path} //= { down: false, fail_count: 0, alert_service_down: false, url: \"${url}\" }"
 
   FAILS="$(state_get "${path}.fail_count")"; FAILS="${FAILS:-0}"
   DOWN="$(state_get "${path}.down")";       DOWN="${DOWN:-false}"
@@ -375,6 +430,7 @@ http_check_one() {
   if (( code_int < HTTP_OK_MIN || code_int > HTTP_OK_MAX )); then
     FAILS=$((FAILS + 1))
     state_apply "${path}.fail_count = ${FAILS}"
+    state_apply "${path}.alert_service_down = false"
 
     if (( FAILS == 1 )); then
       log WARN "$(render_msg "$LOG_HTTP_FAIL" CODE "$CODE" FAILS "$FAILS" THRESHOLD "$HTTP_FAIL_THRESHOLD" URL "$url")"
@@ -386,10 +442,10 @@ http_check_one() {
       if [[ "$WEB_FOUND" == "true" ]]; then
         if [[ "$WEB_ACTIVE" == "true" ]]; then
           log WARN "$(render_msg "$LOG_URL_DOWN_SERVICE_UP" WEB "$WEB_NAME" URL "$url")"
-          send_msg "$(render_msg "$MSG_HTTP_DOWN_SERVICE_UP" CODE "$CODE" FAILS "$FAILS" WEB "$WEB_NAME" URL "$url")"
+          send_msg "$(render_msg "$MSG_HTTP_DOWN_SERVICE_UP" CODE "$CODE" FAILS "$FAILS" WEB "$WEB_NAME" URL "$url" WEB_ACTIVE "$WEB_ACTIVE_LIST" WEB_INACTIVE "$WEB_INACTIVE_LIST")"
         else
           log ERROR "$(render_msg "$LOG_URL_DOWN_SERVICE_DOWN" WEB "$WEB_NAME" URL "$url")"
-          send_msg "$(render_msg "$MSG_HTTP_DOWN_SERVICE_DOWN" CODE "$CODE" FAILS "$FAILS" WEB "$WEB_NAME" URL "$url")"
+          send_msg "$(render_msg "$MSG_HTTP_DOWN_SERVICE_DOWN" CODE "$CODE" FAILS "$FAILS" WEB "$WEB_NAME" URL "$url" WEB_ACTIVE "$WEB_ACTIVE_LIST" WEB_INACTIVE "$WEB_INACTIVE_LIST")"
         fi
       else
         log WARN "$(render_msg "$LOG_URL_DOWN_NO_SERVICE" URL "$url")"
@@ -408,12 +464,33 @@ http_check_one() {
     log INFO "$(render_msg "$LOG_HTTP_RECOVERED" TIME "$TIME_FMT" CODE "$CODE" URL "$url")"
     send_msg "$(render_msg "$MSG_HTTP_RECOVERED" CODE "$CODE" TIME "$TIME_FMT" URL "$url")"
   fi
+
+  if [[ "$WEB_FOUND" == "true" && "$WEB_ACTIVE" != "true" ]]; then
+    local alert_service_down
+    alert_service_down="$(state_get "${path}.alert_service_down")"; alert_service_down="${alert_service_down:-false}"
+    if [[ "$alert_service_down" == "false" ]]; then
+      log WARN "$(render_msg "$LOG_HTTP_UP_SERVICE_DOWN" URL "$url" WEB_INACTIVE "$WEB_INACTIVE_LIST")"
+      send_msg "$(render_msg "$MSG_HTTP_UP_SERVICE_DOWN" URL "$url" WEB_INACTIVE "$WEB_INACTIVE_LIST")"
+      state_apply "${path}.alert_service_down = true"
+    fi
+  else
+    local alert_service_down
+    alert_service_down="$(state_get "${path}.alert_service_down")"; alert_service_down="${alert_service_down:-false}"
+    if [[ "$alert_service_down" == "true" && "$WEB_FOUND" == "true" && "$WEB_ACTIVE" == "true" ]]; then
+      log INFO "$(render_msg "$LOG_HTTP_UP_SERVICE_RECOVER" URL "$url" WEB_ACTIVE "$WEB_ACTIVE_LIST")"
+      send_msg "$(render_msg "$MSG_HTTP_UP_SERVICE_RECOVER" URL "$url" WEB_ACTIVE "$WEB_ACTIVE_LIST")"
+    fi
+    state_apply "${path}.alert_service_down = false"
+  fi
 }
 
 http_check() {
   [[ "$ENABLE_HTTP_MONITOR" -eq 1 ]] || return 0
   build_url_list
-  (( ${#URL_LIST[@]} > 0 )) || return 0
+  if (( ${#URL_LIST[@]} == 0 )); then
+    state_apply '.http.fail_count = 0 | .http.down = false | .http.targets = {} | .http.urls = []'
+    return 0
+  fi
 
   local any_down="false"
   local url key down
@@ -427,9 +504,10 @@ http_check() {
     fi
   done
 
-  local urls_json
+  local urls_json keys_json
   urls_json="$(printf '%s\n' "${URL_LIST[@]}" | jq -R . | jq -s .)"
-  state_apply ".http.urls = ${urls_json} | .http.down = ${any_down}"
+  keys_json="$(printf '%s\n' "${URL_LIST[@]}" | jq -R 'gsub("[^a-zA-Z0-9]"; "_")' | jq -s .)"
+  state_apply ".http.urls = ${urls_json} | .http.down = ${any_down} | .http.targets |= with_entries(select(.key as \$k | ${keys_json} | index(\$k)))"
 }
 
 # ============================================================
@@ -523,10 +601,27 @@ if [[ -z "${TG_TOKEN:-}" || -z "${TG_CHAT:-}" ]]; then
   fi
 fi
 detect_web_service
-state_apply '.web.down //= false | .web.name //= ""'
+state_apply '.web.down //= false | .web.name //= "" | .web.services.active //= [] | .web.services.inactive //= []'
 prev_web_down="$(state_get '.web.down')"; prev_web_down="${prev_web_down:-false}"
 prev_web_name="$(state_get '.web.name')"; prev_web_name="${prev_web_name:-}"
+prev_web_active="$(state_get '.web.services.active | join(",")')"
+prev_web_inactive="$(state_get '.web.services.inactive | join(",")')"
+active_json="[]"
+inactive_json="[]"
+if (( ${#WEB_ACTIVE_UNITS[@]} > 0 )); then
+  active_json="$(printf '%s\n' "${WEB_ACTIVE_UNITS[@]}" | jq -R . | jq -s .)"
+fi
+if (( ${#WEB_INACTIVE_UNITS[@]} > 0 )); then
+  inactive_json="$(printf '%s\n' "${WEB_INACTIVE_UNITS[@]}" | jq -R . | jq -s .)"
+fi
 if [[ "$WEB_FOUND" == "true" ]]; then
+  state_apply ".web.services.active = ${active_json} | .web.services.inactive = ${inactive_json}"
+  if [[ -n "${WEB_ACTIVE_LIST//[[:space:]]/}" && "$WEB_ACTIVE_LIST" != "$prev_web_active" ]]; then
+    log INFO "$(render_msg "$LOG_WEB_ACTIVE" WEB_ACTIVE "$WEB_ACTIVE_LIST")"
+  fi
+  if [[ -n "${WEB_INACTIVE_LIST//[[:space:]]/}" && "$WEB_INACTIVE_LIST" != "$prev_web_inactive" ]]; then
+    log WARN "$(render_msg "$LOG_WEB_INACTIVE" WEB_INACTIVE "$WEB_INACTIVE_LIST")"
+  fi
   state_apply ".web.name = \"${WEB_NAME}\""
     if [[ "$WEB_ACTIVE" == "true" ]]; then
       if [[ "$prev_web_down" == "true" ]]; then
@@ -538,7 +633,7 @@ if [[ "$WEB_FOUND" == "true" ]]; then
             urls_for_log="$(state_get '.http.urls | join(" ")')"
           fi
           log WARN "$(render_msg "$LOG_SERVICE_RECOVER_HTTP_DOWN" WEB "$WEB_NAME" URLS "$urls_for_log")"
-          send_msg "$(render_msg "$MSG_SERVICE_RECOVER_HTTP_DOWN" WEB "$WEB_NAME")"
+          send_msg "$(render_msg "$MSG_SERVICE_RECOVER_HTTP_DOWN" WEB "$WEB_NAME" WEB_ACTIVE "$WEB_ACTIVE_LIST" WEB_INACTIVE "$WEB_INACTIVE_LIST")"
         fi
       fi
     else
@@ -552,10 +647,11 @@ if [[ "$WEB_FOUND" == "true" ]]; then
         urls_for_log="$(state_get '.http.urls | join(" ")')"
       fi
       log ERROR "$(render_msg "$LOG_HTTP_AND_SERVICE_DOWN" WEB "$WEB_NAME" URLS "$urls_for_log")"
-      send_msg "$(render_msg "$MSG_SERVICE_STOPPED_AFTER_HTTP_DOWN" WEB "$WEB_NAME")"
+      send_msg "$(render_msg "$MSG_SERVICE_STOPPED_AFTER_HTTP_DOWN" WEB "$WEB_NAME" WEB_ACTIVE "$WEB_ACTIVE_LIST" WEB_INACTIVE "$WEB_INACTIVE_LIST")"
     fi
   fi
 else
+  state_apply '.web.services.active = [] | .web.services.inactive = []'
   if [[ "$prev_web_down" == "true" || -n "$prev_web_name" ]]; then
     state_apply '.web.down = false | .web.name = ""'
   fi
